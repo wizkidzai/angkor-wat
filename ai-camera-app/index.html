@@ -1,0 +1,431 @@
+
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Angkor Wat Guardian — Accurate Detection + Beep</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.11.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@0.8.5/dist/teachablemachine-image.min.js"></script>
+<style>
+  .progress {height:8px;border-radius:9999px;transition:width .25s ease;}
+  .pulse{animation:pulse 1s infinite;}
+  @keyframes pulse{
+    0%{box-shadow:0 0 0 0 rgba(220,38,38,0.6)}
+    70%{box-shadow:0 0 0 10px rgba(220,38,38,0)}
+    100%{box-shadow:0 0 0 0 rgba(220,38,38,0)}
+  }
+</style>
+</head>
+<body class="bg-gray-50 text-gray-900 min-h-screen antialiased">
+
+<header class="bg-gradient-to-r from-amber-400 to-stone-700 p-4 flex items-center justify-between shadow">
+  <div>
+    <h1 class="text-2xl font-extrabold">Angkor Wat Guardian</h1>
+    <p class="text-sm opacity-90">AI Camera — Real Teachable Machine Accuracy + Beep Alarm</p>
+  </div>
+  <div>
+    <input id="modelInput" type="file" multiple accept=".zip,.json,.bin" class="hidden"/>
+    <button id="chooseModelBtn" class="bg-amber-600 text-white px-3 py-2 rounded shadow">Choose ZIP or Files</button>
+  </div>
+</header>
+
+<div id="alertBanner" class="fixed inset-x-0 top-0 z-50 hidden">
+  <div class="mx-auto max-w-6xl">
+    <div class="bg-red-600 border-2 border-red-800 text-white p-4 rounded-b shadow-lg flex items-center gap-4 pulse">
+      <div class="text-3xl">⚠</div>
+      <div class="flex-1">
+        <div id="alertTitle" class="text-lg font-bold">SECURITY ALERT DETECTED!</div>
+        <div id="alertDetail" class="text-sm opacity-90"></div>
+      </div>
+      <div>
+        <div id="alertConfidence" class="text-xl font-mono"></div>
+        <div id="alertTime" class="text-xs opacity-80"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<main class="p-4 max-w-6xl mx-auto">
+  <section class="grid md:grid-cols-2 gap-4 mb-4">
+    <div class="bg-white p-4 rounded shadow">
+      <h2 class="font-bold">Model</h2>
+      <p class="text-sm text-gray-600">Upload your Teachable Machine ZIP or the three exported files (<code>model.json</code>, <code>metadata.json</code>, <code>weights.bin</code>).</p>
+      <div id="modelName" class="mt-2 text-sm text-gray-800">No model loaded</div>
+      <div class="mt-3">
+        <label class="text-xs">Confidence Threshold: <span id="thVal" class="font-mono">70%</span></label>
+        <input id="threshold" type="range" min="0" max="100" value="70" class="w-full"/>
+      </div>
+    </div>
+
+    <div class="bg-white p-4 rounded shadow">
+      <h2 class="font-bold">Controls</h2>
+      <div class="mt-3 flex gap-2">
+        <button id="startBtn" class="bg-green-600 text-white px-3 py-2 rounded">Start Detection</button>
+        <button id="stopBtn" class="bg-gray-300 text-gray-800 px-3 py-2 rounded">Stop Detection</button>
+      </div>
+      <div class="mt-3 text-sm">Status: <span id="status" class="font-semibold">Stopped</span></div>
+    </div>
+  </section>
+
+  <section class="grid gap-4">
+    <div id="cams" class="grid md:grid-cols-2 gap-4"></div>
+    <div class="bg-white p-4 rounded shadow">
+      <h3 class="font-bold">Recent Alerts</h3>
+      <div id="alertLog" class="mt-2 max-h-56 overflow-auto space-y-2"></div>
+    </div>
+  </section>
+</main>
+
+<!-- No external audio files — beep is synthesized -->
+
+<script>
+/* UI refs */
+const chooseBtn = document.getElementById('chooseModelBtn');
+const modelInput = document.getElementById('modelInput');
+const modelName = document.getElementById('modelName');
+const startBtn = document.getElementById('startBtn');
+const stopBtn = document.getElementById('stopBtn');
+const statusEl = document.getElementById('status');
+const threshold = document.getElementById('threshold');
+const thVal = document.getElementById('thVal');
+const cams = document.getElementById('cams');
+const alertBanner = document.getElementById('alertBanner');
+const alertTitle = document.getElementById('alertTitle');
+const alertDetail = document.getElementById('alertDetail');
+const alertConfidence = document.getElementById('alertConfidence');
+const alertTime = document.getElementById('alertTime');
+const alertLog = document.getElementById('alertLog');
+
+/* model & runtime */
+let tmModel = null;
+let modelLoaded = false;
+let detectionRunning = false;
+let interval = null;
+
+const threat = ["steal","theft","vandal","damage","grab","touch"];
+const safe = ["not","no","safe","normal"];
+const camNames = ["Main Temple","North Gallery","South Gallery","Central Shrine"];
+let streams = [null,null,null,null];
+    
+// Function to automatically fetch the ZIP file and prepare it for use.
+async function loadAndProcessZipModel(zipFilePath) {
+    // Assuming 'statusEl' is a defined element to display the loading status
+    statusEl.textContent = 'Loading model from ZIP...';
+    try {
+        // 1. Fetch the ZIP file as a binary ArrayBuffer
+        const response = await fetch(zipFilePath);
+        if (!response.ok) {
+            throw new Error(`HTTP error! Status: ${response.status}. Check file path and server setup.`);
+            }
+        const arrayBuffer = await response.arrayBuffer();
+
+        // 2. Load the ZIP content using the imported JSZip library
+        const zip = await JSZip.loadAsync(arrayBuffer);
+
+        // 3. (Next step: Process the extracted model files)
+        // At this point, the 'zip' object holds the contents.
+        // You must add your specific logic here to extract the individual
+        // Teachable Machine files (e.g., model.json, weights.bin) and load them.
+        // This often involves creating in-memory Blobs/URLs from the zip contents.
+
+        // Example of setting a success message (adjust as needed for model loading):            
+        statusEl.textContent = 'ZIP file loaded successfully. Running detection...';
+        modelLoaded = true; // Assuming 'modelLoaded' is a global flag for your app
+        // You can now proceed to run your detection function (e.g., scanAllCams())
+
+    } catch (error) {
+        statusEl.textContent = 'Model loading failed.';
+        console.error('Error loading ZIP model:', error);
+        alert('Failed to load the model ZIP file. Please check the console and ensure the file is served correctly.');        }
+    }
+
+// Automatically call the function when the page finishes loading
+window.onload = function() {
+    if (!modelLoaded) {
+        // Ensure 'tm-my-image-model-latest.zip' is in the same folder as index.html
+        loadAndProcessZipModel('./tm-my-image-model-latest.zip');
+    }
+};
+
+/* build camera cards */
+for (let i=0;i<4;i++){
+  cams.insertAdjacentHTML('beforeend', `
+  <div class="bg-white p-3 rounded shadow">
+    <div class="flex justify-between mb-2">
+      <div><div class="font-semibold">${camNames[i]}</div><div class="text-xs text-gray-500">Camera ${i+1}</div></div>
+      <div class="flex gap-2">
+        <button class="start bg-green-500 text-white px-2 py-1 rounded">Start</button>
+        <button class="stop bg-red-500 text-white px-2 py-1 rounded hidden">Stop</button>
+      </div>
+    </div>
+    <div class="bg-black rounded overflow-hidden aspect-video"><video id="v${i}" playsinline autoplay muted class="w-full h-full object-cover"></video></div>
+    <div class="mt-2 text-sm flex justify-between items-center">
+      <div>
+        <div id="s${i}">Status: inactive</div>
+        <div id="label${i}" class="text-xs text-gray-500 italic">No prediction</div>
+      </div>
+      <div id="c${i}" class="font-mono">—</div>
+    </div>
+    <div class="w-full bg-gray-200 mt-2"><div id="bar${i}" class="progress bg-gray-300 w-0"></div></div>
+  </div>`);
+}
+
+const videos = [0,1,2,3].map(i=>document.getElementById('v'+i));
+const statusEls = [0,1,2,3].map(i=>document.getElementById('s'+i));
+const labelEls = [0,1,2,3].map(i=>document.getElementById('label'+i));
+const confEls = [0,1,2,3].map(i=>document.getElementById('c'+i));
+const bars = [0,1,2,3].map(i=>document.getElementById('bar'+i));
+const starts = document.querySelectorAll('.start');
+const stops = document.querySelectorAll('.stop');
+
+/* camera start/stop */
+starts.forEach((b,i)=> b.onclick = ()=> startCam(i));
+stops.forEach((b,i)=> b.onclick = ()=> stopCam(i));
+
+async function startCam(i){
+  try{
+    const s = await navigator.mediaDevices.getUserMedia({video:true,audio:false});
+    streams[i] = s;
+    videos[i].srcObject = s;
+    statusEls[i].textContent = "Status: active";
+    starts[i].classList.add('hidden'); stops[i].classList.remove('hidden');
+  }catch(e){
+    alert('Camera permission denied or unavailable.');
+  }
+}
+function stopCam(i){
+  if (streams[i]) { streams[i].getTracks().forEach(t=>t.stop()); streams[i]=null; }
+  videos[i].srcObject = null;
+  statusEls[i].textContent = "Status: inactive";
+  starts[i].classList.remove('hidden'); stops[i].classList.add('hidden');
+}
+
+/* file load */
+chooseBtn.onclick = ()=> modelInput.click();
+modelInput.onchange = async e => {
+  const files = Array.from(e.target.files);
+  if (files.length === 1 && files[0].name.toLowerCase().endsWith('.zip')) {
+    await loadZip(files[0]);
+  } else {
+    await loadFiles(files);
+  }
+};
+
+async function loadZip(zipFile){
+  modelName.textContent = 'Loading ZIP...';
+  try{
+    const zip = await JSZip.loadAsync(zipFile);
+    const model = await zip.file('model.json').async('string');
+    const meta = await zip.file('metadata.json').async('string');
+    const weights = await zip.file('weights.bin').async('uint8array');
+    const modelURL = URL.createObjectURL(new Blob([model],{type:'application/json'}));
+    const metaURL = URL.createObjectURL(new Blob([meta],{type:'application/json'}));
+    const wb = new Blob([weights], {type:'application/octet-stream'});
+    const origFetch = window.fetch.bind(window);
+    window.fetch = async (input, init) => {
+      try{
+        const us = typeof input === 'string' ? input : (input && input.url) || '';
+        if (us.toLowerCase().endsWith('weights.bin')) return new Response(wb, {headers: {'Content-Type': 'application/octet-stream'}});
+      }catch(e){}
+      return origFetch(input, init);
+    };
+    tmModel = await tmImage.load(modelURL, metaURL);
+    modelLoaded = true;
+    modelName.textContent = 'Model loaded: ' + zipFile.name;
+  }catch(err){ modelLoaded = false; modelName.textContent = 'No model loaded'; alert('Failed to load ZIP: ' + err.message); }
+}
+
+// Modified version of loadZip to fetch the file from a given path
+async function loadZipFromPath(zipFilePath) {
+  modelName.textContent = 'Loading ZIP automatically...';
+  statusEl.textContent = 'Loading...';
+  
+  try {
+    // 1. Fetch the ZIP file as a binary ArrayBuffer
+    const response = await fetch(zipFilePath);
+    if (!response.ok) {
+      throw new Error(`HTTP error! Status: ${response.status}.`);
+    }
+    const arrayBuffer = await response.arrayBuffer();
+    
+    // 2. Load the ZIP content using the ArrayBuffer
+    const zip = await JSZip.loadAsync(arrayBuffer);
+    
+    // 3. Extract the model files (replicating logic from original loadZip)
+    const model = await zip.file('model.json').async('string');
+    const meta = await zip.file('metadata.json').async('string');
+    const weights = await zip.file('weights.bin').async('uint8array');
+    const modelURL = URL.createObjectURL(new Blob([model],{type:'application/json'}));
+    const metaURL = URL.createObjectURL(new Blob([meta],{type:'application/json'}));
+    const wb = new Blob([weights], {type:'application/octet-stream'});
+    
+    // 4. Hook fetch to intercept weights.bin (critical for Teachable Machine model loading)
+    const origFetch = window.fetch.bind(window);
+    window.fetch = async (input, init) => {
+      try{
+        const us = typeof input === 'string' ? input : (input && input.url) || '';
+        if (us.toLowerCase().endsWith('weights.bin')) return new Response(wb, {headers: {'Content-Type': 'application/octet-stream'}});
+      }catch(e){}
+      return origFetch(input, init);
+    };
+    
+    // 5. Load the Teachable Machine model
+    tmModel = await tmImage.load(modelURL, metaURL);
+    modelLoaded = true;
+    modelName.textContent = 'Model loaded: ' + zipFilePath + ' (Auto-loaded)';
+    
+    // 6. Automatically click the start button to begin detection
+    startBtn.click();
+
+  } catch(err){ 
+    modelLoaded = false; 
+    modelName.textContent = 'No model loaded'; 
+    statusEl.textContent = 'Stopped (Auto-load failed)';
+    console.error('Failed to auto-load ZIP model from path:', err);
+  }
+}
+
+// Call the function on page load to start the process
+if (!modelLoaded) { 
+    // Ensure 'tm-my-image-model-latest.zip' is in the same directory as 'index.html'
+    loadZipFromPath('./tm-my-image-model-latest.zip');
+}
+
+async function loadFiles(files){
+  const m = files.find(f=>f.name.toLowerCase().includes('model.json'));
+  const me = files.find(f=>f.name.toLowerCase().includes('metadata.json'));
+  const w = files.find(f=>f.name.toLowerCase().includes('weights.bin'));
+  if (!m || !me || !w) return alert('Select model.json, metadata.json and weights.bin together.');
+  try{
+    const modelURL = URL.createObjectURL(m);
+    const metaURL = URL.createObjectURL(me);
+    const origFetch = window.fetch.bind(window);
+    window.fetch = async (input, init) => {
+      try{
+        const us = typeof input === 'string' ? input : (input && input.url) || '';
+        if (us.toLowerCase().endsWith('weights.bin')) return new Response(w, {headers: {'Content-Type': 'application/octet-stream'}});
+      }catch(e){}
+      return origFetch(input, init);
+    };
+    tmModel = await tmImage.load(modelURL, metaURL);
+    modelLoaded = true;
+    modelName.textContent = 'Model loaded: ' + m.name;
+  }catch(err){ modelLoaded = false; modelName.textContent = 'No model loaded'; alert('Failed to load files: ' + err.message); }
+}
+
+/* beep generator (two short beeps) */
+let audioCtx = null;
+function playBeepBeep(){
+  try{
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const now = audioCtx.currentTime;
+    const duration = 0.12; // each beep length
+    const gap = 0.12;
+    // first beep
+    const osc1 = audioCtx.createOscillator();
+    const gain1 = audioCtx.createGain();
+    osc1.type = 'sine';
+    osc1.frequency.setValueAtTime(1000, now);
+    gain1.gain.setValueAtTime(0.0001, now);
+    gain1.gain.exponentialRampToValueAtTime(0.5, now + 0.01);
+    gain1.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+    osc1.connect(gain1); gain1.connect(audioCtx.destination);
+    osc1.start(now); osc1.stop(now + duration + 0.02);
+    // second beep
+    const start2 = now + duration + gap;
+    const osc2 = audioCtx.createOscillator();
+    const gain2 = audioCtx.createGain();
+    osc2.type = 'sine';
+    osc2.frequency.setValueAtTime(1200, start2);
+    gain2.gain.setValueAtTime(0.0001, start2);
+    gain2.gain.exponentialRampToValueAtTime(0.5, start2 + 0.01);
+    gain2.gain.exponentialRampToValueAtTime(0.0001, start2 + duration);
+    osc2.connect(gain2); gain2.connect(audioCtx.destination);
+    osc2.start(start2); osc2.stop(start2 + duration + 0.02);
+  }catch(e){
+    console.warn('Audio error', e);
+  }
+}
+
+/* detection loop that uses tmModel.predict(video) */
+async function scan(){
+  if (!tmModel) return;
+  const thresholdVal = threshold.value/100;
+  for (let i=0;i<videos.length;i++){
+    const v = videos[i];
+    if (!v || v.readyState < 2) continue;
+    try{
+      const preds = await tmModel.predict(v); // Teachable Machine prediction array [{className,probability},...]
+      preds.sort((a,b)=>b.probability - a.probability);
+      const top = preds[0];
+      const conf = (top.probability * 100).toFixed(1);
+      const label = (top.className || '').toLowerCase();
+      const isStealing = threat.some(k=> label.includes(k)) && !safe.some(s=>label.includes(s));
+      let color, statusMsg, textColor;
+      if (top.probability < thresholdVal){
+        color = 'bg-gray-300';
+        statusMsg = '⚪ No Activity';
+        textColor = 'text-gray-500 italic';
+      } else if (isStealing){
+        color = 'bg-red-500';
+        statusMsg = '🟥 Stealing Detected!';
+        textColor = 'text-red-600 font-bold';
+      } else {
+        color = 'bg-yellow-400';
+        statusMsg = '🟨 Not Stealing';
+        textColor = 'text-yellow-600 font-bold';
+      }
+      confEls[i].textContent = conf + '%';
+      bars[i].style.width = conf + '%';
+      bars[i].className = 'progress ' + color;
+      labelEls[i].textContent = statusMsg;
+      labelEls[i].className = 'text-xs ' + textColor;
+
+      if (isStealing && top.probability >= thresholdVal){
+        // play beep to warn and log alert (short beep-beep)
+        playBeepBeep();
+        showAlert(camNames[i], top.className, conf);
+      }
+    }catch(err){
+      confEls[i].textContent = 'err';
+      console.error('scan error', err);
+    }
+  }
+}
+
+/* alert UI */
+function showAlert(cam, label, conf){
+  alertTitle.textContent = '⚠ SECURITY ALERT DETECTED!';
+  alertDetail.textContent = cam + ' — ' + label;
+  alertConfidence.textContent = conf + '%';
+  alertTime.textContent = new Date().toLocaleTimeString();
+  alertBanner.classList.remove('hidden');
+  const row = document.createElement('div');
+  row.className = 'p-2 border rounded flex justify-between';
+  row.innerHTML = `<div><b>${cam}</b> — ${label}</div><div>${conf}%</div>`;
+  alertLog.prepend(row);
+  while (alertLog.children.length > 12) alertLog.removeChild(alertLog.lastChild);
+  setTimeout(()=> alertBanner.classList.add('hidden'), 5000);
+}
+
+/* controls */
+threshold.oninput = ()=> thVal.textContent = threshold.value + '%';
+startBtn.onclick = ()=> {
+  if (!modelLoaded) return alert('Load a model first (ZIP or files).');
+  if (detectionRunning) return;
+  detectionRunning = true;
+  statusEl.textContent = 'Running';
+  interval = setInterval(scan, 900);
+};
+stopBtn.onclick = ()=> {
+  detectionRunning = false;
+  statusEl.textContent = 'Stopped';
+  clearInterval(interval);
+};
+</script>
+</body>
+</html>
+
